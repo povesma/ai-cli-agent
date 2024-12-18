@@ -164,7 +164,7 @@ def ai_agent(task, non_interactive=False):
         {"role": "user", "content": f"Task: {task}"}
     ]
     total_tokens_used = 0
-
+    gpt_calls = 0
     while True:
 
         # For debugging: print the conversation structure before each API call
@@ -173,6 +173,7 @@ def ai_agent(task, non_interactive=False):
         #     logger.debug(f"Role: {message['role']}, Content: {message['content'][:50]}...")
         response, tokens = gpt_call(conversation)
         total_tokens_used += tokens
+        gpt_calls += 1
 
         if response is None:
             logger.error(f"{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}")
@@ -225,10 +226,11 @@ def ai_agent(task, non_interactive=False):
         else:
             logger.warning(f"{Fore.YELLOW}Command completed with non-zero return code: {return_code}{Style.RESET_ALL}")
 
-        logger.info(f"Command output:n{output}")
+        logger.info(f"Command output:\n{output}")
 
-        conversation.append({"role": "user", "content": f"OK, I ran the suggested command. nReturn code: {return_code}nFull command output:n{output}nnDoes this meet the expectations of the initial task? What's the next step?"})
-        
+        conversation.append({"role": "user", "content": f"OK, I ran the suggested command.\nReturn code: {return_code}\nFull command output:\n{output}\n\nDoes this meet the expectations of the initial task? What's the next step?"})
+    print(f"Task completed. Some statistics: {gpt_calls} GPT calls, {total_tokens_used} total tokens used.")
+
 def load_message_history():
     try:
         with open(MESSAGE_HISTORY_FILE, 'r') as f:

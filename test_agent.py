@@ -1,4 +1,4 @@
-import pytest
+from unittest.mock import patch
 from unittest.mock import patch, MagicMock
 from agent import ai_agent, gpt_call, execute_command
 
@@ -23,5 +23,20 @@ def test_execute_command():
         assert result['output'] == 'stdout:\nTest output\nstderr:\n'
         assert result['return_code'] == 0
 
-if __name__ == '__main__':
-    pytest.main([__file__])
+def test_ai_agent():
+    with patch("agent.gpt_call") as mock_gpt_call, \
+          patch("agent.execute_command") as mock_execute_command, \
+     patch("builtins.input", return_value="y"):
+        # action = action_data["action"]
+        # explanation = action_data["explanation"]
+        # expected_outcome = action_data["expected_outcome"]
+        # is_destructive = action_data["is_destructive"]
+
+        mock_gpt_call.side_effect = [
+            ('{"action": "echo hello", "explanation": "Print out hello", "expected_outcome": "hello on the screen", "is_destructive": false}', 10),
+            ('{"task_complete": true, "summary": "Task completed successfully"}', 5)
+        ]
+        ai_agent('Show the list of files')
+        assert mock_gpt_call.call_count == 2
+        assert mock_execute_command.call_count == 1
+        mock_execute_command.assert_called_with('echo hello')
