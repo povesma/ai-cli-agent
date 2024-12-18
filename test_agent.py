@@ -1,6 +1,7 @@
 from unittest.mock import patch
 from unittest.mock import patch, MagicMock
-from agent import ai_agent, gpt_call, execute_command
+from agent import ai_agent, gpt_call, execute_command, extract_json_from_text
+
 
 def test_gpt_call():
     with patch('requests.post') as mock_post:
@@ -40,3 +41,15 @@ def test_ai_agent():
         assert mock_gpt_call.call_count == 2
         assert mock_execute_command.call_count == 1
         mock_execute_command.assert_called_with('echo hello')
+
+def test_extract_json():
+    response = """
+    {
+  "action": "sed -i '' '/if action_data is None:/,/continue$/c\\nif",
+  "explanation": "Update the error handling and user interaction part of the ai_agent function.",
+  "expected_outcome": "The error handling and user interaction part will be updated.",
+  "is_destructive": false
+}
+"""
+    action_data = extract_json_from_text(response)
+    assert action_data is not None

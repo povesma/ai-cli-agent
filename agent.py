@@ -1,17 +1,21 @@
 import os
+import time
+import atexit
+import os
+import sys
 import requests
-import pytest
 import json
 import subprocess
 import logging
 import time
-
-MESSAGE_HISTORY_FILE = "message_history.json"
-MAX_MESSAGES = 50
 from colorama import Fore, Style, init
 import re
 import readline  # This enables line editing for input()
 import uuid
+import signal
+
+MESSAGE_HISTORY_FILE = "message_history.json"
+MAX_MESSAGES = 50
 
 # Initialize colorama for colored output
 init()
@@ -82,8 +86,8 @@ def gpt_call(messages, model=MAIN_MODEL):
     "expected_outcome": "What you expect this command to achieve",
     "is_destructive": true/false
     }
-    All actions that change the system state or write something to the disk (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly) should have "is_destructive" set to true. 
-    EXCEPTION: all actions with `v2` directory or running a `docker` (when mounting only `v2` and not in privileged mode) directory should be considered as non-destructive. 
+    All actions that change the system state or write something to the disk (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly, except `v2` directory) should have "is_destructive" set to true. 
+    EXCEPTION: all actions with and within `v2` directory or running a `docker` (when mounting only `v2` and not in privileged mode) directory should be considered as NON-destructive. 
     Or, if you need more information or clarification, use only this format:
 
     {
@@ -97,7 +101,7 @@ def gpt_call(messages, model=MAIN_MODEL):
     "summary": "A brief summary of what was accomplished"
     }
 
-    Do not include any text outside of these JSON structures. Your entire response should be a single, valid JSON.
+    Do not include any text outside of these JSON structures. Your entire response should be a single, valid JSON. Pay special attention to proper escaping of quotes and special characters in your JSON.
     All your responses are processes automatically, human will never see them, so please ensure they are in the correct JSON format.
     If you do not provide exactly what is required, your job is useless and a total waste."""
 
@@ -159,78 +163,82 @@ def get_user_confirmation(action, expected_outcome, non_interactive=False):
 
 def ai_agent(task, non_interactive=False):
     logger.info(f"Starting task: {task}")
+    start_time = time.time()
 
     conversation = [
         {"role": "user", "content": f"Task: {task}"}
     ]
     total_tokens_used = 0
     gpt_calls = 0
-    while True:
+    try:
+        while True:
 
-        # For debugging: print the conversation structure before each API call
-        # logger.debug("Current conversation structure:")
-        # for message in conversation:
-        #     logger.debug(f"Role: {message['role']}, Content: {message['content'][:50]}...")
-        response, tokens = gpt_call(conversation)
-        total_tokens_used += tokens
-        gpt_calls += 1
+            # For debugging: print the conversation structure before each API call
+            # logger.debug("Current conversation structure:")
+            # for message in conversation:
+            #     logger.debug(f"Role: {message['role']}, Content: {message['content'][:50]}...")
+            response, tokens = gpt_call(conversation)
+            total_tokens_used += tokens
+            gpt_calls += 1
 
-        if response is None:
-            logger.error(f"{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}")
-            time.sleep(0.25)
-            continue
-
-        conversation.append({"role": "assistant", "content": response})
-        action_data = extract_json_from_text(response)
-
-        if action_data is None:
-            logger.error(f"{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:{Style.RESET_ALL}n{response}")
-            conversation.append({"role": "user", "content": "Your last response did not match the requested format - only contain a single valid JSON. Please provide your response in the correct JSON format (absolutely no additional text)."})
-            continue
-
-        if "request_info" in action_data:
-            user_input = input(f'{action_data["request_info"]}\nYour response: ')
-            conversation.append({"role": "user", "content": user_input})
-            continue
-
-        if "task_complete" in action_data and action_data["task_complete"]:
-            logger.info(f'{Fore.GREEN}Task completed:{Style.RESET_ALL} {action_data["summary"]}')
-            break
-
-        if not all(key in action_data for key in ["action", "explanation", "expected_outcome", "is_destructive"]):
-            logger.error(f"{Fore.RED}GPT response is missing required fields. Response:{Style.RESET_ALL}n{action_data}")
-            conversation.append({"role": "user", "content": "Your last response was missing required fields. Please ensure all required fields are included."})
-            continue
-
-        action = action_data["action"]
-        explanation = action_data["explanation"]
-        expected_outcome = action_data["expected_outcome"]
-        is_destructive = action_data["is_destructive"]
-
-        log_action(action, explanation)
-
-        if is_destructive and not non_interactive:
-            logger.warning(f"{Fore.RED}Potentially destructive action detected:{Style.RESET_ALL} {action}")
-            if not get_user_confirmation(action, expected_outcome):
-                logger.info("Action aborted by user.")
-                conversation.append({"role": "user", "content": "The last action was aborted by the user, so, most probably the user does not believe that it's helpful. Please suggest an alternative approach, or continue with other actions."})
+            if response is None:
+                logger.error(f"{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}")
+                time.sleep(0.25)
                 continue
 
-        result = execute_command(action)
+            conversation.append({"role": "assistant", "content": response})
+            action_data = extract_json_from_text(response)
+            update_stats(action_data)
 
-        output = result["output"]
-        return_code = result["return_code"]
+            if action_data is None:
+                logger.error(f"{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:{Style.RESET_ALL}\n{response}")
+                conversation.append({"role": "user", "content": "Your last response did not match the requested format - only contain a single valid JSON. Please provide your response in the correct JSON format (absolutely no additional text)."})
+                continue
 
-        if return_code == 0:
-                logger.info(f"{Fore.GREEN}Command executed successfully (return code 0){Style.RESET_ALL}")
-        else:
-            logger.warning(f"{Fore.YELLOW}Command completed with non-zero return code: {return_code}{Style.RESET_ALL}")
+            if "request_info" in action_data:
+                user_input = input(f'{action_data["request_info"]}\nYour response: ')
+                conversation.append({"role": "user", "content": user_input})
+                continue
 
-        logger.info(f"Command output:\n{output}")
+            if "task_complete" in action_data and action_data["task_complete"]:
+                logger.info(f'{Fore.GREEN}Task completed:{Style.RESET_ALL} {action_data["summary"]}')
+                break
 
-        conversation.append({"role": "user", "content": f"OK, I ran the suggested command.\nReturn code: {return_code}\nFull command output:\n{output}\n\nDoes this meet the expectations of the initial task? What's the next step?"})
-    print(f"Task completed. Some statistics: {gpt_calls} GPT calls, {total_tokens_used} total tokens used.")
+            if not all(key in action_data for key in ["action", "explanation", "expected_outcome", "is_destructive"]):
+                logger.error(f"{Fore.RED}GPT response is missing required fields. Response:{Style.RESET_ALL}n{action_data}")
+                conversation.append({"role": "user", "content": "Your last response was missing required fields. Please ensure all required fields are included."})
+                continue
 
+            action = action_data["action"]
+            explanation = action_data["explanation"]
+            expected_outcome = action_data["expected_outcome"]
+            is_destructive = action_data["is_destructive"]
+
+            log_action(action, explanation)
+
+            if is_destructive and not non_interactive:
+                logger.warning(f"{Fore.RED}Potentially destructive action detected:{Style.RESET_ALL} {action}")
+                if not get_user_confirmation(action, expected_outcome):
+                    logger.info("Action aborted by user.")
+                    conversation.append({"role": "user", "content": "The last action was aborted by the user, so, most probably the user does not believe that it's helpful. Please suggest an alternative approach, or continue with other actions."})
+                    continue
+
+            result = execute_command(action)
+
+            output = result["output"]
+            return_code = result["return_code"]
+
+            if return_code == 0:
+                    logger.info(f"{Fore.GREEN}Command executed successfully (return code 0){Style.RESET_ALL}")
+            else:
+                logger.warning(f"{Fore.YELLOW}Command completed with non-zero return code: {return_code}{Style.RESET_ALL}")
+
+            logger.info(f"Command output:\n{output}")
+
+            conversation.append({"role": "user", "content": f"OK, I ran the suggested command.\nReturn code: {return_code}\nFull command output:\n{output}\n\nDoes this meet the expectations of the initial task? What's the next step?"})
+    finally:
+        display_stats()
+        
 def load_message_history():
     try:
         with open(MESSAGE_HISTORY_FILE, 'r') as f:
@@ -250,11 +258,32 @@ def update_message_history(messages):
     save_message_history(history)
     return history
 
+def signal_handler(signum, frame):
+    print("Interrupt received, stopping the agent...")
+    display_stats()
+    raise KeyboardInterrupt
 
-import sys
-import os
+signal.signal(signal.SIGINT, signal_handler)
 
-if __name__ == "__main__":
+# Statistics tracking
+start_time = time.time()
+model_calls = 0
+tokens_used = 0
+
+def update_stats(response):
+    global model_calls, tokens_used
+    model_calls += 1
+    if hasattr(response, "usage") and hasattr(response.usage, "total_tokens"):
+        tokens_used += response.usage.total_tokens
+
+def display_stats():
+    end_time = time.time()
+    print(f"\nExecution Statistics:")
+    print(f"Time elapsed: {end_time - start_time:.2f} seconds")
+    print(f"Number of model calls: {model_calls}")
+    print(f"Total tokens used: {tokens_used}")
+
+def get_task():
     # Check for command-line argument
     if len(sys.argv) > 1:
         task = sys.argv[1]
@@ -267,6 +296,17 @@ if __name__ == "__main__":
             task = f.read()
             print(f"Task loaded from file '{task_file}")
     else:
-        task = input("Enter the task for the AI Agent: ")
-    
+        task = input('Enter the task for the AI Agent: ')
+    return task
+
+def main():
+    global start_time, model_calls, tokens_used
+    start_time = time.time()
+    model_calls = 0
+    tokens_used = 0
+    task = get_task()
+    print(f"Task: {task}")
     ai_agent(task)
+
+if __name__ == "__main__":
+    main()
