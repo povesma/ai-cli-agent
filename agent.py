@@ -20,17 +20,21 @@ API_URL = os.environ.get('GPT_API_URL')
 SUBSCRIPTION_KEY = os.environ.get('GPT_SUBSCRIPTION_KEY')
 GPT_TOKEN = os.environ.get('GPT_TOKEN')
 MAIN_MODEL = os.environ.get('GPT_MODEL') or "CLAUDE_3_SONNET_35"
-
+HEADERS = os.environ.get('HEADERS') or ""  # example: "host:private_host,session:session_id"
+# Parsed headers from HEADERS var:
+PARSED_HEADERS = {k: v for k, v in [header.split(':') for header in HEADERS.split(',')]} if HEADERS else {}
 def get_token():
     return input("Enter your GPT token: ").strip()
 
 def get_headers():
+    # merge the parsed headers with the default headers
     return {
-        # 'host': 'amd',
-        'Subscription-Key': SUBSCRIPTION_KEY,
-        'Authorization': 'Bearer ' + GPT_TOKEN,
-        'Content-Type': 'application/json',
-        'jll-request-id': str(uuid.uuid4())  # Generate a new GUID for each request
+        **PARSED_HEADERS, **{
+            'Subscription-Key': SUBSCRIPTION_KEY,
+            'Authorization': 'Bearer ' + GPT_TOKEN,
+            'Content-Type': 'application/json',
+            'jll-request-id': str(uuid.uuid4())  # Generate a new GUID for each request
+        }
     }
 
 def refresh_token():
@@ -61,30 +65,33 @@ def extract_json_from_text(text):
         return None
 
 def gpt_call(messages, model=MAIN_MODEL):
-    system_message = """You are an AI agent designed to perform tasks on a local computer using CLI commands. 
-    Your responses must strictly adhere to the one of the following JSON formats, with no additional text before or after, exacty one JSON:
+    system_message = """You are an AI agent designed to perform tasks on a local computer using CLI commands. The commands you execute should be well considered: if you lack some data to run a proper command - first you should run a "research" command to gather the necessary information about the system and its configuration.
+    I case you need to access the Internet (with curl or other tools) be sure not to expose any sensitive information (in case of doubt mark it destructive).
+    Your responses must strictly adhere to the one of the following JSON formats, with no additional text before or after, exactly one valid JSON:
 
     {
-        "action": "The CLI command to execute",
-        "explanation": "A brief explanation of what this command does and why it's necessary",
-        "expected_outcome": "What you expect this command to achieve",
-        "is_destructive": true/false
+    "action": "The CLI command to execute",
+    "explanation": "A brief explanation of what this command does and why it's necessary",
+    "expected_outcome": "What you expect this command to achieve",
+    "is_destructive": true/false
     }
     All actions that change the system state or write something to the disk (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly) should have "is_destructive" set to true.
     Or, if you need more information or clarification, use only this format:
 
     {
-        "request_info": "The specific information or clarification you need"
+    "request_info": "The specific information or clarification you need"
     }
 
     Or, if the task is complete, respond only with:
 
     {
-        "task_complete": true,
-        "summary": "A brief summary of what was accomplished"
+    "task_complete": true,
+    "summary": "A brief summary of what was accomplished"
     }
 
-    Do not include any text outside of these JSON structures. Your entire response should be valid JSON."""
+    Do not include any text outside of these JSON structures. Your entire response should be a single, valid JSON.
+    All your responses are processes automatically, human will never see them, so please ensure they are in the correct JSON format.
+    If you do not provide exactly what is required, your job is useless and a total waste."""
 
     # Ensure the system message is only at the beginning
     if messages[0]['role'] != 'system':
@@ -120,7 +127,7 @@ def gpt_call(messages, model=MAIN_MODEL):
 def execute_command(command):
     try:
         result = subprocess.run(command, shell=True, text=True, capture_output=True)
-        output = result.stdout + result.stderr
+        output = 'stdout:\n' + result.stdout + '\nstderr:\n' + result.stderr
         return {
             'output': output,
             'return_code': result.returncode
@@ -211,7 +218,7 @@ def ai_agent(task):
         logger.info(f"Command output:\n{output}")
 
         # Add the result of the command execution to the conversation
-        conversation.append({"role": "user", "content": f"Command output: {output}\nReturn code: {return_code}\nDoes this meet the expectations? What's the next step?"})
+        conversation.append({"role": "user", "content": f"OK, I ran the suggested command. \nReturn code: {return_code}\nFull command output:\n{output}\n\nDoes this meet the expectations of the initial task? What's the next step?"})
 
 if __name__ == "__main__":
     print("Welcome to the AI Agent CLI.")
