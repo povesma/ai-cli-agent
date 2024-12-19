@@ -32,6 +32,12 @@ MAIN_MODEL = os.environ.get('GPT_MODEL') or "CLAUDE_3_SONNET_35"
 HEADERS = os.environ.get('HEADERS') or ""  # example: "host:private_host,session:session_id"
 # Parsed headers from HEADERS var:
 PARSED_HEADERS = {k: v for k, v in [header.split(':') for header in HEADERS.split(',')]} if HEADERS else {}
+
+# number oj jsons failed in a raw
+failed_json_count = 0
+
+MAX_FAILED_JSONS_ALLOWED = 3
+
 def get_token():
     return input("Enter your GPT token: ").strip()
 
@@ -56,6 +62,19 @@ def extract_json_from_text(text):
     """
     Extracts JSON from text, even if it's surrounded by other content or formatted with markdown code blocks.
     """
+
+    def esc(json_string):
+        # Define the allowed escape sequences in JSON
+        allowed_escapes = set('"\\/bfnrtu')
+        def replace_invalid_escapes(matching):
+            if match.group(1) in allowed_escapes:
+                return matching.group(0)  # Keep valid escapes as they are
+            else:
+                return '\\\\'  # Replace invalid escapes with double backslash
+
+        # Use regex to find all backslashes and process them
+        return re.sub(r'\\(.)', replace_invalid_escapes, json_string)
+
     # Try to find JSON wrapped in code blocks
     match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
     if match:
@@ -67,10 +86,24 @@ def extract_json_from_text(text):
 
     # Clean up potential JSON string
     potential_json = potential_json.strip()
-
+    global failed_json_count
     try:
-        return json.loads(potential_json)
-    except json.JSONDecodeError:
+        parsed_json = json.loads(potential_json)
+        failed_json_count = 0
+        return parsed_json
+    except json.JSONDecodeError as e:
+        print(f"{Fore.RED}Failed to parse JSON from text:{Style.RESET_ALL}\n{e}. Trying workaround...")
+        try:
+            potential_json2 = esc(potential_json)
+            parsed_json=json.loads(potential_json2)
+            failed_json_count = 0
+            return parsed_json
+        except json.JSONDecodeError as e2:
+            print(f"{Fore.RED}COMPLETELY Failed to parse JSON...{Style.RESET_ALL}\n{e2}. Failed count in a row: {failed_json_count}")
+            if failed_json_count >= MAX_FAILED_JSONS_ALLOWED:
+                print(f"{Fore.RED}Too many failed JSONs in a row. Exiting...{Style.RESET_ALL}")
+                raise json.JSONDecodeError("fail", "{}", 0)
+
         return None
 
 def gpt_call(messages, model=MAIN_MODEL):
@@ -84,6 +117,7 @@ def gpt_call(messages, model=MAIN_MODEL):
     "action": "The CLI command to execute",
     "explanation": "A brief explanation of what this command does and why it's necessary",
     "expected_outcome": "What you expect this command to achieve",
+    "subtask": "Brief description of the subtask of the main task, which is now being solved",
     "is_destructive": true/false
     }
     All actions that change the system state or write something to the disk (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly, except `v2` directory) should have "is_destructive" set to true. 
@@ -92,9 +126,10 @@ def gpt_call(messages, model=MAIN_MODEL):
 
     {
     "request_info": "The specific information or clarification you need"
+    "subtask": "Brief description of the subtask of the main task, which is now being solved",
     }
 
-    Or, if the task is complete, respond only with:
+    Or, if the main task is complete and there's absolutely nothing to do, respond only with:
 
     {
     "task_complete": true,
@@ -124,8 +159,8 @@ def gpt_call(messages, model=MAIN_MODEL):
 
         if response.status_code == 200:
             data = response.json()
-            tokens_used = data.get("usage", {}).get("total_tokens", 0)
-            return data.get("choices")[0]["message"]["content"], tokens_used
+            tokens = data.get("usage", {}).get("total_tokens", 0)
+            return data.get("choices")[0]["message"]["content"], tokens
         elif response.status_code == 401:
             logger.error(f"{Fore.RED}Token expired. Refreshing token...{Style.RESET_ALL}")
             refresh_token()
@@ -152,9 +187,13 @@ def execute_command(command):
             'return_code': -1
         }
 
-def log_action(action, explanation):
+def log_action(action, explanation, expected_outcome = "", subtask = ""):
     logger.info(f"{Fore.CYAN}Action:{Style.RESET_ALL} {action}")
     logger.info(f"{Fore.GREEN}Explanation:{Style.RESET_ALL} {explanation}")
+    if expected_outcome:
+        print(f"{Fore.YELLOW}Expected outcome:{Style.RESET_ALL} {expected_outcome}")
+    if subtask:
+        print(f"{Fore.MAGENTA}Subtask:{Style.RESET_ALL} {subtask}")
 
 def get_user_confirmation(action, expected_outcome, non_interactive=False):
     print(f"n{Fore.YELLOW}Proposed action:{Style.RESET_ALL} {action}")
@@ -179,7 +218,7 @@ def ai_agent(task, non_interactive=False):
             #     logger.debug(f"Role: {message['role']}, Content: {message['content'][:50]}...")
             response, tokens = gpt_call(conversation)
             total_tokens_used += tokens
-            gpt_calls += 1
+            update_stats(tokens)
 
             if response is None:
                 logger.error(f"{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}")
@@ -188,11 +227,10 @@ def ai_agent(task, non_interactive=False):
 
             conversation.append({"role": "assistant", "content": response})
             action_data = extract_json_from_text(response)
-            update_stats(action_data)
 
             if action_data is None:
                 logger.error(f"{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:{Style.RESET_ALL}\n{response}")
-                conversation.append({"role": "user", "content": "Your last response did not match the requested format - only contain a single valid JSON. Please provide your response in the correct JSON format (absolutely no additional text)."})
+                conversation.append({"role": "user", "content": "Your last response did not match the requested format - shall only contain a single valid JSON (check escaping quotes and special symbols). Please provide your response in the correct JSON format (absolutely no any additional text)."})
                 continue
 
             if "request_info" in action_data:
@@ -211,10 +249,11 @@ def ai_agent(task, non_interactive=False):
 
             action = action_data["action"]
             explanation = action_data["explanation"]
+            subtask = action_data.get("subtask", "-NO-SUBTASK-")
             expected_outcome = action_data["expected_outcome"]
             is_destructive = action_data["is_destructive"]
 
-            log_action(action, explanation)
+            log_action(action, explanation, expected_outcome, subtask)
 
             if is_destructive and not non_interactive:
                 logger.warning(f"{Fore.RED}Potentially destructive action detected:{Style.RESET_ALL} {action}")
@@ -270,11 +309,10 @@ start_time = time.time()
 model_calls = 0
 tokens_used = 0
 
-def update_stats(response):
+def update_stats(tokens):
     global model_calls, tokens_used
     model_calls += 1
-    if hasattr(response, "usage") and hasattr(response.usage, "total_tokens"):
-        tokens_used += response.usage.total_tokens
+    tokens_used += tokens
 
 def display_stats():
     end_time = time.time()

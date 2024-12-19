@@ -1,2 +1,6 @@
 requests==2.31.0
 colorama==0.4.6
+mypy
+pylint
+types-colorama
+types-requests

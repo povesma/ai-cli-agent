@@ -83,15 +83,16 @@ The agent logs actions, explanations, and command outputs to the console. It als
 This project is licensed under the MIT License. See the `LICENSE` file for more details.
 
 ## TODO
-1. Better logging and stats (time of execution, number of model calls (+), tokens used (+), etc.). Show statistics on program completion, including when it was aborted / terminated by the user
 1. When running this script, model may solve sub-tasks, and sub-sub-tasks (which a part of the big task) and so on. At each step we need to know what problem is being solved right now, and the relation to the big task / super-tasks (if any). This should be included in the model response where relevant (requires prompt modification).
 1. Save history of tasks, steps taken, assessment of success for future use: display for user, browse and re-run, etc.
+1. Based on the history, be able to start from the specific step, or re-run the task from the beginning.
 1. Enable completely non-interactive mode (configurable): it's partially implemented with passing task as ENV var file name / CLI argument, but script still may ask for user input (e.g. confirmation of a destructive action). This should be configurable - FAIL on destructive action attempt, or auto accept, or ask for confirmation.
 1. Enable user interaction between the steps: sometimes GPT runs into the situation when it can't resolve a trivial problem, or the command output should be retrieved from a third-party service; in these cases the user can provide valuable information, or at least to pause and fix something in the background, and then continue the script. Obvioustly, this should not require waiting for the user inout after each step, but the user should be able to do so.
-1. Dockerize the agent (partially done, not tested)
 1. When the messages exceed the context limit (tokens) of the model, the message with an initial task is cut off. This should be avoided regardless of our knowledge of the context window of the model.
 1. Support more APIs (what?)
 1. Allow / ban / encourage access to the Internet via configuration
 
 ## Changelog (Moved from TODO)
 1. *DONE.* Enable passing the task as a command line argument / ENV var / file
+1. *DONE.* Better logging and stats (time of execution, number of model calls (+), tokens used (+), etc.). Show statistics on program completion, including when it was aborted / terminated by the user
+1. *DONE.* Dockerize the agent (not tested)
