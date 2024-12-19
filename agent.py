@@ -1,4 +1,5 @@
 import datetime
+from typing import List, Dict, Any
 import os
 import time
 import atexit
@@ -38,11 +39,31 @@ NON_INTERACTIVE = os.environ.get("AI_AGENT_NON_INTERACTIVE", "false").lower() ==
 MAX_FAILED_JSONS_ALLOWED = int(os.environ.get('MAX_FAILED_JSONS_ALLOWED', 3))
 
 # Message history configuration
-MESSAGE_HISTORY_FILE = os.environ.get('MESSAGE_HISTORY_FILE', "message_history.json")
+MESSAGE_HISTORY_FILE = os.environ.get('MESSAGE_HISTORY_FILE', 'message_history.json')
 MAX_MESSAGES = int(os.environ.get('MAX_MESSAGES', 100))
 
 # number oj jsons failed in a raw
 failed_json_count = 0
+
+# New data structure for message history
+class HistoryEntry:
+    def __init__(self, message_type, content, timestamp, session_number, message_number, message_number_in_session):
+        self.message_type = message_type
+        self.content = content
+        self.timestamp = timestamp
+        self.session_number = session_number
+        self.message_number = message_number
+        self.message_number_in_session = message_number_in_session
+
+    def to_dict(self):
+        return {
+            "message_type": self.message_type,
+            "content": self.content,
+            "timestamp": self.timestamp,
+            "session_number": self.session_number,
+            "message_number": self.message_number,
+            "message_number_in_session": self.message_number_in_session
+        }
 
 def get_token():
     return input("Enter your GPT token: ").strip()
@@ -64,7 +85,7 @@ def refresh_token():
     GPT_TOKEN = get_token()
     logger.info(f"{Fore.GREEN}Token refreshed successfully.{Style.RESET_ALL}")
 
-def extract_json_from_text(text):
+def extract_json_from_text(text: str) -> Dict[str, Any]:
     """
     Extracts JSON from text, even if it's surrounded by other content or formatted with markdown code blocks.
     """
@@ -110,7 +131,7 @@ def extract_json_from_text(text):
                 print(f"{Fore.RED}Too many failed JSONs in a row. Exiting...{Style.RESET_ALL}")
                 raise json.JSONDecodeError("fail", "{}", 0)
 
-        return None
+        return {}
 
 def gpt_call(messages, model=MAIN_MODEL):
 
@@ -169,13 +190,13 @@ def gpt_call(messages, model=MAIN_MODEL):
         elif response.status_code == 401:
             logger.error(f"{Fore.RED}Token expired. Refreshing token...{Style.RESET_ALL}")
             refresh_token()
-            return None, 0
+            return {}  # Return an empty dictionary instead of None, 0
         else:
             logger.error(f'API Error: Status Code: {response.status_code}, Response: {response.text}')
-            return None, 0
+            return {}  # Return an empty dictionary instead of None, 0
     except requests.exceptions.RequestException as e:
         logger.error(f'HTTP Request failed: {e}')
-        return None, 0
+        return {}  # Return an empty dictionary instead of None, 0
 
 def execute_command(command):
     try:
@@ -226,7 +247,7 @@ def ai_agent(task, non_interactive=False):
                 continue
             conversation.append({'role': 'assistant', 'content': response})
             action_data = extract_json_from_text(response)
-            if action_data is None:
+            if not action_data:  # this includes {}
                 logger.error(f'{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:\n{Style.RESET_ALL}{response}')
                 conversation.append({'role': 'user', 'content': 'Your last response did not match the requested format. Please provide your response in the correct JSON format.'})
                 continue
@@ -275,32 +296,55 @@ def ai_agent(task, non_interactive=False):
         return conversation
 
 
-def load_message_history():
+def load_message_history() -> List[HistoryEntry]:
     try:
         with open(MESSAGE_HISTORY_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+            return [HistoryEntry(**entry) for entry in data]
     except FileNotFoundError:
         return []
     except json.JSONDecodeError:
         logger.error(f"Error decoding {MESSAGE_HISTORY_FILE}. Starting with empty history.")
         return []
 
-def save_message_history(history):
+def save_message_history(history: List[HistoryEntry]) -> None:
     try:
         with open(MESSAGE_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history, f, indent=2)
+            json.dump([entry.to_dict() for entry in history], f, indent=2)
     except IOError as e:
         logging.error(f"Failed to save message history to {MESSAGE_HISTORY_FILE}: {e}")
     except TypeError as e:
         logging.error(f"Failed to serialize message history: {e}")
+        logging.error(f"Failed to serialize message history: {e}")
 
-def update_message_history(messages):
-    # Load the existing message history from file / DB
+def update_message_history(messages: List[Dict[str, str]]) -> List[HistoryEntry]:
     history = load_message_history()
-    history.extend(messages)
-    # Trim the history to the last MAX_MESSAGES
+    session_number = len(history) + 1
+    message_number = len(history) + 1
+    message_number_in_session = 1
+    timestamp = datetime.datetime.now().isoformat()
+    
+    for message in messages:
+        content = extract_json_from_text(message["content"])
+        if content:
+            message_type = "request_info" if "request_info" in content else \
+                           "task_complete" if "task_complete" in content else \
+                           "action"
+            entry = HistoryEntry(
+                message_type=message_type,
+                content=content,
+                timestamp=timestamp,
+                session_number=session_number,
+                message_number=message_number,
+                message_number_in_session=message_number_in_session
+            )
+            history.append(entry)
+            message_number += 1
+            message_number_in_session += 1
+    
     if len(history) > MAX_MESSAGES:
         history = history[-MAX_MESSAGES:]
+    
     save_message_history(history)
     return history
 
@@ -354,6 +398,9 @@ def main():
     print(f"Task: {task}")
     conversation = ai_agent(task, non_interactive=NON_INTERACTIVE)
     update_message_history(conversation)
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
