@@ -1,3 +1,4 @@
+import datetime
 import os
 import time
 import atexit
@@ -13,9 +14,6 @@ import re
 import readline  # This enables line editing for input()
 import uuid
 import signal
-
-MESSAGE_HISTORY_FILE = "message_history.json"
-MAX_MESSAGES = 50
 
 # Initialize colorama for colored output
 init()
@@ -33,10 +31,18 @@ HEADERS = os.environ.get('HEADERS') or ""  # example: "host:private_host,session
 # Parsed headers from HEADERS var:
 PARSED_HEADERS = {k: v for k, v in [header.split(':') for header in HEADERS.split(',')]} if HEADERS else {}
 
+# Interactive by default
+NON_INTERACTIVE = os.environ.get("AI_AGENT_NON_INTERACTIVE", "false").lower() == "true"
+
+# Maximum number of failed JSONs allowed in a row before exiting (TODO: pause instead of exit, ask for user input)
+MAX_FAILED_JSONS_ALLOWED = int(os.environ.get('MAX_FAILED_JSONS_ALLOWED', 3))
+
+# Message history configuration
+MESSAGE_HISTORY_FILE = os.environ.get('MESSAGE_HISTORY_FILE', "message_history.json")
+MAX_MESSAGES = int(os.environ.get('MAX_MESSAGES', 100))
+
 # number oj jsons failed in a raw
 failed_json_count = 0
-
-MAX_FAILED_JSONS_ALLOWED = 3
 
 def get_token():
     return input("Enter your GPT token: ").strip()
@@ -107,8 +113,7 @@ def extract_json_from_text(text):
         return None
 
 def gpt_call(messages, model=MAIN_MODEL):
-    # [Content of the function]
-    # ... [Previous implementation] ...
+
     system_message = """You are an AI agent designed to perform tasks on a local computer using CLI commands. The commands you execute should be well considered: if you lack some data to run a proper command - first you should run a "research" command to gather the necessary information about the system and its configuration.
     I case you need to access the Internet (with curl or other tools) be sure not to expose any sensitive information (in case of doubt mark it destructive).
     Your responses must strictly adhere to the one of the following JSON formats, with no additional text before or after, exactly one valid JSON:
@@ -136,8 +141,8 @@ def gpt_call(messages, model=MAIN_MODEL):
     "summary": "A brief summary of what was accomplished"
     }
 
-    Do not include any text outside of these JSON structures. Your entire response should be a single, valid JSON. Pay special attention to proper escaping of quotes and special characters in your JSON.
-    All your responses are processes automatically, human will never see them, so please ensure they are in the correct JSON format.
+    Do not include any text outside of these JSON structures. Your entire response should be a single, valid JSON.
+    All your responses are processed automatically by the script, any human will never see them, so please ensure they are in the correct JSON format.
     If you do not provide exactly what is required, your job is useless and a total waste."""
 
     # Ensure the system message is only at the beginning
@@ -196,102 +201,104 @@ def log_action(action, explanation, expected_outcome = "", subtask = ""):
         print(f"{Fore.MAGENTA}Subtask:{Style.RESET_ALL} {subtask}")
 
 def get_user_confirmation(action, expected_outcome, non_interactive=False):
-    print(f"n{Fore.YELLOW}Proposed action:{Style.RESET_ALL} {action}")
+    print(f"{Fore.YELLOW}Proposed action:{Style.RESET_ALL} {action}")
     print(f"{Fore.YELLOW}Expected outcome:{Style.RESET_ALL} {expected_outcome}")
+    if non_interactive:
+        print("Running in non-interactive mode. Automatically proceeding.")
+        return True
     return input("Do you want to proceed? (y/n): ").lower() == "y"
 
-def ai_agent(task, non_interactive=False):
-    logger.info(f"Starting task: {task}")
-    start_time = time.time()
 
-    conversation = [
-        {"role": "user", "content": f"Task: {task}"}
-    ]
+def ai_agent(task, non_interactive=False):
+    logger.info(f'Starting task: {task}')
+    conversation = [{'role': 'user', 'content': f'Task: {task}'}]
     total_tokens_used = 0
     gpt_calls = 0
     try:
         while True:
-
-            # For debugging: print the conversation structure before each API call
-            # logger.debug("Current conversation structure:")
-            # for message in conversation:
-            #     logger.debug(f"Role: {message['role']}, Content: {message['content'][:50]}...")
             response, tokens = gpt_call(conversation)
             total_tokens_used += tokens
             update_stats(tokens)
-
+            gpt_calls += 1
             if response is None:
-                logger.error(f"{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}")
+                logger.error(f'{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}')
                 time.sleep(0.25)
                 continue
-
-            conversation.append({"role": "assistant", "content": response})
+            conversation.append({'role': 'assistant', 'content': response})
             action_data = extract_json_from_text(response)
-
             if action_data is None:
-                logger.error(f"{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:{Style.RESET_ALL}\n{response}")
-                conversation.append({"role": "user", "content": "Your last response did not match the requested format - shall only contain a single valid JSON (check escaping quotes and special symbols). Please provide your response in the correct JSON format (absolutely no any additional text)."})
+                logger.error(f'{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:\n{Style.RESET_ALL}{response}')
+                conversation.append({'role': 'user', 'content': 'Your last response did not match the requested format. Please provide your response in the correct JSON format.'})
                 continue
-
-            if "request_info" in action_data:
-                user_input = input(f'{action_data["request_info"]}\nYour response: ')
-                conversation.append({"role": "user", "content": user_input})
+            if 'request_info' in action_data:
+                if non_interactive:
+                    logger.info(f'Skipping user input request in non-interactive mode: {action_data["request_info"]}')
+                    conversation.append({'role': 'user', 'content': 'Skipped due to non-interactive mode. Please continue with the task using available information.'})
+                else:
+                    user_input = input(f'{action_data["request_info"]}Your response: ')
+                    conversation.append({'role': 'user', 'content': user_input})
                 continue
-
-            if "task_complete" in action_data and action_data["task_complete"]:
+            if 'task_complete' in action_data and action_data['task_complete']:
                 logger.info(f'{Fore.GREEN}Task completed:{Style.RESET_ALL} {action_data["summary"]}')
                 break
-
-            if not all(key in action_data for key in ["action", "explanation", "expected_outcome", "is_destructive"]):
-                logger.error(f"{Fore.RED}GPT response is missing required fields. Response:{Style.RESET_ALL}n{action_data}")
-                conversation.append({"role": "user", "content": "Your last response was missing required fields. Please ensure all required fields are included."})
+            if not all(key in action_data for key in ['action', 'explanation', 'expected_outcome', 'is_destructive']):
+                logger.error(f'{Fore.RED}GPT response is missing required fields. Response:\n{Style.RESET_ALL}{action_data}')
+                conversation.append({'role': 'user', 'content': 'Your last response was missing required fields. Please ensure all required fields are included.'})
                 continue
-
-            action = action_data["action"]
-            explanation = action_data["explanation"]
-            subtask = action_data.get("subtask", "-NO-SUBTASK-")
-            expected_outcome = action_data["expected_outcome"]
-            is_destructive = action_data["is_destructive"]
-
+            action = action_data['action']
+            explanation = action_data['explanation']
+            subtask = action_data.get('subtask', '-NO-SUBTASK-')
+            expected_outcome = action_data['expected_outcome']
+            is_destructive = action_data['is_destructive']
             log_action(action, explanation, expected_outcome, subtask)
-
-            if is_destructive and not non_interactive:
-                logger.warning(f"{Fore.RED}Potentially destructive action detected:{Style.RESET_ALL} {action}")
-                if not get_user_confirmation(action, expected_outcome):
-                    logger.info("Action aborted by user.")
-                    conversation.append({"role": "user", "content": "The last action was aborted by the user, so, most probably the user does not believe that it's helpful. Please suggest an alternative approach, or continue with other actions."})
-                    continue
-
+            if is_destructive:
+                if non_interactive:
+                    logger.warning(f'{Fore.RED}Potentially destructive action detected:{Style.RESET_ALL} {action}')
+                    logger.info('Running in non-interactive mode. Automatically proceeding.')
+                else:
+                    logger.warning(f'{Fore.RED}Potentially destructive action detected:{Style.RESET_ALL} {action}')
+                    if not get_user_confirmation(action, expected_outcome, non_interactive):
+                        logger.info('Action aborted by user.')
+                        conversation.append({'role': 'user', 'content': 'The last action was aborted by the user. Please suggest an alternative approach or continue with other actions.'})
+                        continue
             result = execute_command(action)
-
-            output = result["output"]
-            return_code = result["return_code"]
-
+            output = result['output']
+            return_code = result['return_code']
             if return_code == 0:
-                    logger.info(f"{Fore.GREEN}Command executed successfully (return code 0){Style.RESET_ALL}")
+                logger.info(f'{Fore.GREEN}Command executed successfully (return code 0){Style.RESET_ALL}')
             else:
-                logger.warning(f"{Fore.YELLOW}Command completed with non-zero return code: {return_code}{Style.RESET_ALL}")
-
-            logger.info(f"Command output:\n{output}")
-
-            conversation.append({"role": "user", "content": f"OK, I ran the suggested command.\nReturn code: {return_code}\nFull command output:\n{output}\n\nDoes this meet the expectations of the initial task? What's the next step?"})
+                logger.warning(f'{Fore.YELLOW}Command completed with non-zero return code: {return_code}{Style.RESET_ALL}')
+            logger.info(f'Command output:\n{output}')
+            conversation.append({'role': 'user', 'content': f'OK, I ran the suggested command.\nReturn code: {return_code}\nFull command output:\n{output}\n\nDoes this meet the expectations of the initial task? What\'s the next step?'})
     finally:
         display_stats()
-        
+        return conversation
+
+
 def load_message_history():
     try:
-        with open(MESSAGE_HISTORY_FILE, 'r') as f:
+        with open(MESSAGE_HISTORY_FILE, "r") as f:
             return json.load(f)
     except FileNotFoundError:
         return []
+    except json.JSONDecodeError:
+        logger.error(f"Error decoding {MESSAGE_HISTORY_FILE}. Starting with empty history.")
+        return []
 
-def save_message_history(messages):
-    with open(MESSAGE_HISTORY_FILE, 'w') as f:
-        json.dump(messages, f)
-        
+def save_message_history(history):
+    try:
+        with open(MESSAGE_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+    except IOError as e:
+        logging.error(f"Failed to save message history to {MESSAGE_HISTORY_FILE}: {e}")
+    except TypeError as e:
+        logging.error(f"Failed to serialize message history: {e}")
+
 def update_message_history(messages):
+    # Load the existing message history from file / DB
     history = load_message_history()
     history.extend(messages)
+    # Trim the history to the last MAX_MESSAGES
     if len(history) > MAX_MESSAGES:
         history = history[-MAX_MESSAGES:]
     save_message_history(history)
@@ -316,10 +323,11 @@ def update_stats(tokens):
 
 def display_stats():
     end_time = time.time()
-    print(f"\nExecution Statistics:")
+    print(f"Execution Statistics:")
     print(f"Time elapsed: {end_time - start_time:.2f} seconds")
     print(f"Number of model calls: {model_calls}")
     print(f"Total tokens used: {tokens_used}")
+    print(f"Task completed at : {datetime.datetime.now().isoformat()}")
 
 def get_task():
     # Check for command-line argument
@@ -344,7 +352,8 @@ def main():
     tokens_used = 0
     task = get_task()
     print(f"Task: {task}")
-    ai_agent(task)
+    conversation = ai_agent(task, non_interactive=NON_INTERACTIVE)
+    update_message_history(conversation)
 
 if __name__ == "__main__":
     main()
