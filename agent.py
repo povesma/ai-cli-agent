@@ -1,20 +1,19 @@
 import datetime
-from typing import List, Dict, Any
-import os
-import time
-import atexit
+from typing import List, Dict, Any, Optional
 import os
 import sys
 import requests
-import json
 import subprocess
 import logging
 import time
 from colorama import Fore, Style, init
-import re
 import readline  # This enables line editing for input()
 import uuid
 import signal
+
+import parsers
+from parsers import extract_json_from_text
+from prompts import system_prompt_simple as system_prompt
 
 # Initialize colorama for colored output
 init()
@@ -23,6 +22,7 @@ init()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+PARSER = "TEXT"
 # GPT API configuration
 API_URL = os.environ.get('GPT_API_URL')
 SUBSCRIPTION_KEY = os.environ.get('GPT_SUBSCRIPTION_KEY')
@@ -38,46 +38,23 @@ NON_INTERACTIVE = os.environ.get("AI_AGENT_NON_INTERACTIVE", "false").lower() ==
 # Maximum number of failed JSONs allowed in a row before exiting (TODO: pause instead of exit, ask for user input)
 MAX_FAILED_JSONS_ALLOWED = int(os.environ.get('MAX_FAILED_JSONS_ALLOWED', 3))
 
-# Message history configuration
-MESSAGE_HISTORY_FILE = os.environ.get('MESSAGE_HISTORY_FILE', 'message_history.json')
-MAX_MESSAGES = int(os.environ.get('MAX_MESSAGES', 100))
-
 # number oj jsons failed in a raw
 failed_json_count = 0
-
-# New data structure for message history
-class HistoryEntry:
-    def __init__(self, message_type, content, timestamp, session_number, message_number, message_number_in_session):
-        self.message_type = message_type
-        self.content = content
-        self.timestamp = timestamp
-        self.session_number = session_number
-        self.message_number = message_number
-        self.message_number_in_session = message_number_in_session
-
-    def to_dict(self):
-        return {
-            "message_type": self.message_type,
-            "content": self.content,
-            "timestamp": self.timestamp,
-            "session_number": self.session_number,
-            "message_number": self.message_number,
-            "message_number_in_session": self.message_number_in_session
-        }
 
 def get_token():
     return input("Enter your GPT token: ").strip()
 
 def get_headers():
     # merge the parsed headers with the default headers
-    return {
-        **PARSED_HEADERS, **{
-            'Subscription-Key': SUBSCRIPTION_KEY,
-            'Authorization': 'Bearer ' + GPT_TOKEN,
-            'Content-Type': 'application/json',
-            'jll-request-id': str(uuid.uuid4())  # Generate a new GUID for each request
-        }
+    headers = {
+        **PARSED_HEADERS,
+        "Subscription-Key": SUBSCRIPTION_KEY,
+        "Content-Type": "application/json",
+        "jll-request-id": str(uuid.uuid4())  # Generate a new GUID for each request
     }
+    if GPT_TOKEN:
+        headers["Authorization"] = f"Bearer {GPT_TOKEN}"
+    return headers
 
 def refresh_token():
     global GPT_TOKEN
@@ -85,92 +62,28 @@ def refresh_token():
     GPT_TOKEN = get_token()
     logger.info(f"{Fore.GREEN}Token refreshed successfully.{Style.RESET_ALL}")
 
-def extract_json_from_text(text: str) -> Dict[str, Any]:
-    """
-    Extracts JSON from text, even if it's surrounded by other content or formatted with markdown code blocks.
-    """
 
-    def esc(json_string):
-        # Define the allowed escape sequences in JSON
-        allowed_escapes = set('"\\/bfnrtu')
-        def replace_invalid_escapes(matching):
-            if match.group(1) in allowed_escapes:
-                return matching.group(0)  # Keep valid escapes as they are
-            else:
-                return '\\\\'  # Replace invalid escapes with double backslash
-
-        # Use regex to find all backslashes and process them
-        return re.sub(r'\\(.)', replace_invalid_escapes, json_string)
-
-    # Try to find JSON wrapped in code blocks
-    match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
-    if match:
-        potential_json = match.group(1)
+def parse_llm_response(text: str) -> Dict[str, Any]:
+    resp = {}
+    if PARSER == "JSON":
+        global failed_json_count
+        resp, updated_failed_json_count = parsers.extract_json_from_text(text, failed_json_count, MAX_FAILED_JSONS_ALLOWED)
+        failed_json_count = updated_failed_json_count
+    elif PARSER == "TEXT":
+        resp = parsers.parse_text_response(text)
     else:
-        # If no code blocks, try to find JSON-like structure
-        match = re.search(r'(\{[\s\S]*\})', text)
-        potential_json = match.group(1) if match else text
+        logger.error(f"{Fore.RED}Unknown parser type: {PARSER}{Style.RESET_ALL}")
+    logger.info(f"{Fore.CYAN}Parsed response:{Style.RESET_ALL} {resp}")
+    return resp
 
-    # Clean up potential JSON string
-    potential_json = potential_json.strip()
-    global failed_json_count
-    try:
-        parsed_json = json.loads(potential_json)
-        failed_json_count = 0
-        return parsed_json
-    except json.JSONDecodeError as e:
-        print(f"{Fore.RED}Failed to parse JSON from text:{Style.RESET_ALL}\n{e}. Trying workaround...")
-        try:
-            potential_json2 = esc(potential_json)
-            parsed_json=json.loads(potential_json2)
-            failed_json_count = 0
-            return parsed_json
-        except json.JSONDecodeError as e2:
-            print(f"{Fore.RED}COMPLETELY Failed to parse JSON...{Style.RESET_ALL}\n{e2}. Failed count in a row: {failed_json_count}")
-            if failed_json_count >= MAX_FAILED_JSONS_ALLOWED:
-                print(f"{Fore.RED}Too many failed JSONs in a row. Exiting...{Style.RESET_ALL}")
-                raise json.JSONDecodeError("fail", "{}", 0)
-
-        return {}
 
 def gpt_call(messages, model=MAIN_MODEL):
 
-    system_message = """You are an AI agent designed to perform tasks on a local computer using CLI commands. The commands you execute should be well considered: if you lack some data to run a proper command - first you should run a "research" command to gather the necessary information about the system and its configuration.
-    I case you need to access the Internet (with curl or other tools) be sure not to expose any sensitive information (in case of doubt mark it destructive).
-    Your responses must strictly adhere to the one of the following JSON formats, with no additional text before or after, exactly one valid JSON:
-
-    {
-    "action": "The CLI command to execute",
-    "explanation": "A brief explanation of what this command does and why it's necessary",
-    "expected_outcome": "What you expect this command to achieve",
-    "subtask": "Brief description of the subtask of the main task, which is now being solved",
-    "is_destructive": true/false
-    }
-    All actions that change the system state or write something to the disk (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly, except `v2` directory) should have "is_destructive" set to true. 
-    EXCEPTION: all actions with and within `v2` directory or running a `docker` (when mounting only `v2` and not in privileged mode) directory should be considered as NON-destructive. 
-    Or, if you need more information or clarification, use only this format:
-
-    {
-    "request_info": "The specific information or clarification you need"
-    "subtask": "Brief description of the subtask of the main task, which is now being solved",
-    }
-
-    Or, if the main task is complete and there's absolutely nothing to do, respond only with:
-
-    {
-    "task_complete": true,
-    "summary": "A brief summary of what was accomplished"
-    }
-
-    Do not include any text outside of these JSON structures. Your entire response should be a single, valid JSON.
-    All your responses are processed automatically by the script, any human will never see them, so please ensure they are in the correct JSON format.
-    If you do not provide exactly what is required, your job is useless and a total waste."""
-
     # Ensure the system message is only at the beginning
     if messages[0]['role'] != 'system':
-        messages = [{"role": "system", "content": system_message}] + messages
+        messages = [{"role": "system", "content": system_prompt}] + messages
     else:
-        messages[0]['content'] = system_message
+        messages[0]['content'] = system_prompt
 
     payload = {
         "messages": messages,
@@ -246,15 +159,41 @@ def ai_agent(task, non_interactive=False):
                 time.sleep(0.25)
                 continue
             conversation.append({'role': 'assistant', 'content': response})
-            action_data = extract_json_from_text(response)
+            global failed_json_count
+            action_data = parse_llm_response(response)
+
             if not action_data:  # this includes {}
                 logger.error(f'{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:\n{Style.RESET_ALL}{response}')
                 conversation.append({'role': 'user', 'content': 'Your last response did not match the requested format. Please provide your response in the correct JSON format.'})
                 continue
+            # Check that ACTION, REQUEST_INFO and TASK_COMPLETE together (in any combination) are never in one response - they are exclusive.
+            exclusive_keys = ['action', 'request_info', 'task_complete']
+            present_keys = [key for key in exclusive_keys if key in action_data]
+
+            if len(present_keys) > 1:
+                error_messages = {
+                    frozenset(['action', 'request_info']): 'an action and a request for information',
+                    frozenset(['action', 'task_complete']): 'an action and a task completion message',
+                    frozenset(
+                        ['request_info', 'task_complete']): 'a request for information and a task completion message'
+                }
+
+                error_key = frozenset(present_keys)
+                error_description = error_messages.get(error_key, 'multiple exclusive items')
+
+                logger.error(
+                    f'{Fore.RED}Multiple exclusive items are present in the response. This is not allowed. Response:\n{Style.RESET_ALL}{action_data}')
+                conversation.append({
+                    'role': 'user',
+                    'content': f'Your last response contained {error_description}. Please provide only one of these in your response.'
+                })
+                continue
+
+
             if 'request_info' in action_data:
                 if non_interactive:
                     logger.info(f'Skipping user input request in non-interactive mode: {action_data["request_info"]}')
-                    conversation.append({'role': 'user', 'content': 'Skipped due to non-interactive mode. Please continue with the task using available information.'})
+                    conversation.append({'role': 'user', 'content': 'Skipped due to non-interactive mode. Please continue with the task using available information (or terminate if it is impossible or dangerous).'})
                 else:
                     user_input = input(f'{action_data["request_info"]}Your response: ')
                     conversation.append({'role': 'user', 'content': user_input})
@@ -266,6 +205,8 @@ def ai_agent(task, non_interactive=False):
                 logger.error(f'{Fore.RED}GPT response is missing required fields. Response:\n{Style.RESET_ALL}{action_data}')
                 conversation.append({'role': 'user', 'content': 'Your last response was missing required fields. Please ensure all required fields are included.'})
                 continue
+
+            # Here we assume that we need to execute the action:
             action = action_data['action']
             explanation = action_data['explanation']
             subtask = action_data.get('subtask', '-NO-SUBTASK-')
@@ -294,59 +235,6 @@ def ai_agent(task, non_interactive=False):
     finally:
         display_stats()
         return conversation
-
-
-def load_message_history() -> List[HistoryEntry]:
-    try:
-        with open(MESSAGE_HISTORY_FILE, "r") as f:
-            data = json.load(f)
-            return [HistoryEntry(**entry) for entry in data]
-    except FileNotFoundError:
-        return []
-    except json.JSONDecodeError:
-        logger.error(f"Error decoding {MESSAGE_HISTORY_FILE}. Starting with empty history.")
-        return []
-
-def save_message_history(history: List[HistoryEntry]) -> None:
-    try:
-        with open(MESSAGE_HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump([entry.to_dict() for entry in history], f, indent=2)
-    except IOError as e:
-        logging.error(f"Failed to save message history to {MESSAGE_HISTORY_FILE}: {e}")
-    except TypeError as e:
-        logging.error(f"Failed to serialize message history: {e}")
-        logging.error(f"Failed to serialize message history: {e}")
-
-def update_message_history(messages: List[Dict[str, str]]) -> List[HistoryEntry]:
-    history = load_message_history()
-    session_number = len(history) + 1
-    message_number = len(history) + 1
-    message_number_in_session = 1
-    timestamp = datetime.datetime.now().isoformat()
-    
-    for message in messages:
-        content = extract_json_from_text(message["content"])
-        if content:
-            message_type = "request_info" if "request_info" in content else \
-                           "task_complete" if "task_complete" in content else \
-                           "action"
-            entry = HistoryEntry(
-                message_type=message_type,
-                content=content,
-                timestamp=timestamp,
-                session_number=session_number,
-                message_number=message_number,
-                message_number_in_session=message_number_in_session
-            )
-            history.append(entry)
-            message_number += 1
-            message_number_in_session += 1
-    
-    if len(history) > MAX_MESSAGES:
-        history = history[-MAX_MESSAGES:]
-    
-    save_message_history(history)
-    return history
 
 def signal_handler(signum, frame):
     print("Interrupt received, stopping the agent...")
@@ -397,10 +285,9 @@ def main():
     task = get_task()
     print(f"Task: {task}")
     conversation = ai_agent(task, non_interactive=NON_INTERACTIVE)
-    update_message_history(conversation)
+    # update_message_history(conversation)  # type: ignore
 
 if __name__ == "__main__":
     main()
 
-if __name__ == "__main__":
-    main()
+
