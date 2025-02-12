@@ -6,10 +6,13 @@ import requests
 import subprocess
 import logging
 import time
+import json
 from colorama import Fore, Style, init
 import readline  # This enables line editing for input()
 import uuid
 import signal
+import time
+
 
 import parsers
 from parsers import extract_json_from_text
@@ -23,6 +26,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 PARSER = "TEXT"
+GPT_DELAY = int(os.getenv('GPT_DELAY', 2))
+
 # GPT API configuration
 API_URL = os.environ.get('GPT_API_URL')
 SUBSCRIPTION_KEY = os.environ.get('GPT_SUBSCRIPTION_KEY')
@@ -62,6 +67,38 @@ def refresh_token():
     GPT_TOKEN = get_token()
     logger.info(f"{Fore.GREEN}Token refreshed successfully.{Style.RESET_ALL}")
 
+def save_output_to_file(output, filename):
+    with open(filename, 'w') as file:
+        file.write(output)
+
+def get_output_metadata(output, filename, first_n=500, last_n=700):
+    size = os.path.getsize(filename)
+    tokens = len(output.split())
+    first_words = ' '.join(output.split()[:first_n])
+    last_words = ' '.join(output.split()[-last_n:])
+    return {
+        "filename": filename,
+        "size": size,
+        "tokens": tokens,
+        "first_words": first_words,
+        "last_words": last_words
+    }
+
+def handle_input_too_long_error(messages):
+    output_filename = "output_too_long.txt"
+    save_output_to_file(messages[-1]['content'], output_filename)
+    metadata = get_output_metadata(messages[-1]['content'], output_filename)
+    return ({"error": "Error: Input is too long for the requested model.",
+        "message":
+            (
+                f"Filename where the full output is stored: ./{metadata['filename']} . DO NOT PRINT IT, otherwise you'll get the same error, or run the command that does not produce such a long output\n"
+                f"Size: {metadata['size']} bytes\n"
+                f"Tokens: {metadata['tokens']}\n"
+                f"---First words---: {metadata['first_words']}\n"
+                f"---Last words---: {metadata['last_words']}"
+             )
+        }
+    , 0)
 
 def parse_llm_response(text: str) -> Dict[str, Any]:
     resp = {}
@@ -77,39 +114,52 @@ def parse_llm_response(text: str) -> Dict[str, Any]:
     return resp
 
 
-def gpt_call(messages, model=MAIN_MODEL):
-
-    # Ensure the system message is only at the beginning
-    if messages[0]['role'] != 'system':
-        messages = [{"role": "system", "content": system_prompt}] + messages
-    else:
-        messages[0]['content'] = system_prompt
-
-    payload = {
-        "messages": messages,
-        "model": model,
-        "temperature": 0.7,
-        "choiceCount": 1,
-    }
-
-    try:
-        headers = get_headers()  # Get fresh headers with a new GUID for each call
-        response = requests.post(API_URL, headers=headers, json=payload)
-
-        if response.status_code == 200:
-            data = response.json()
-            tokens = data.get("usage", {}).get("total_tokens", 0)
-            return data.get("choices")[0]["message"]["content"], tokens
-        elif response.status_code == 401:
-            logger.error(f"{Fore.RED}Token expired. Refreshing token...{Style.RESET_ALL}")
-            refresh_token()
-            return {}  # Return an empty dictionary instead of None, 0
+def gpt_call(messages, model=MAIN_MODEL, max_retries=3):
+    def make_request(messages):
+        # Ensure the system message is only at the beginning
+        if messages[0]['role'] != 'system':
+            messages = [{"role": "system", "content": system_prompt}] + messages
         else:
-            logger.error(f'API Error: Status Code: {response.status_code}, Response: {response.text}')
-            return {}  # Return an empty dictionary instead of None, 0
-    except requests.exceptions.RequestException as e:
-        logger.error(f'HTTP Request failed: {e}')
-        return {}  # Return an empty dictionary instead of None, 0
+            messages[0]['content'] = system_prompt
+
+        payload = {
+            "messages": messages,
+            "model": model,
+            "temperature": 0.8,
+            "choiceCount": 1,
+        }
+
+        headers = get_headers()  # Get fresh headers with a new GUID for each call
+        return requests.post(API_URL, headers=headers, json=payload)
+
+    for attempt in range(max_retries + 1):
+        logger.info(f"{Fore.YELLOW}GPT call attempt {attempt + 1}/{max_retries + 1}{Style.RESET_ALL}")
+        time.sleep(GPT_DELAY)
+
+        try:
+            response = make_request(messages)
+
+            if response.status_code == 200:
+                data = response.json()
+                tokens = data.get("usage", {}).get("total_tokens", 0)
+                return data.get("choices")[0]["message"]["content"], tokens
+            elif response.status_code == 401 and attempt < max_retries:
+                logger.error(f"{Fore.RED}Token expired. Refreshing token...{Style.RESET_ALL}")
+                refresh_token()
+                # Continue to the next iteration, which will retry the request
+            elif response.status_code == 500 and "Input is too long" in response.text:
+                logger.error(f"{Fore.RED}Input is too long for the requested model. Saving output to file...{Style.RESET_ALL}")
+                return handle_input_too_long_error(messages)
+            else:
+                logger.error(f'API Error: Status Code: {response.status_code}, Response: {response.text}')
+                return None, 0
+        except requests.exceptions.RequestException as e:
+            logger.error(f'HTTP Request failed: {e}')
+            return None, 0
+
+    # If we've exhausted all retries
+    logger.error("Max retries reached. Unable to complete the request.")
+    return None, 0
 
 def execute_command(command):
     try:
@@ -154,6 +204,12 @@ def ai_agent(task, non_interactive=False):
             total_tokens_used += tokens
             update_stats(tokens)
             gpt_calls += 1
+
+            # Handling the error from API side
+            if isinstance(response, dict) and "error" in response:
+                logger.error(f'{Fore.RED}{response["error"]}{Style.RESET_ALL}')
+                conversation.append({'role': 'user', 'content': response["message"]})
+                continue
             if response is None:
                 logger.error(f'{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}')
                 time.sleep(0.25)
@@ -185,7 +241,7 @@ def ai_agent(task, non_interactive=False):
                     f'{Fore.RED}Multiple exclusive items are present in the response. This is not allowed. Response:\n{Style.RESET_ALL}{action_data}')
                 conversation.append({
                     'role': 'user',
-                    'content': f'Your last response contained {error_description}. Please provide only one of these in your response.'
+                    'content': f'Your last response contained {error_description}. You MUST redo you last response, and if it contains ACTION - keep it (because it was not executed!), and remove the conflicting fields. Please provide only one of these in your response.'
                 })
                 continue
 
