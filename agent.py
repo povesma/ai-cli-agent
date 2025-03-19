@@ -110,7 +110,7 @@ def parse_llm_response(text: str) -> Dict[str, Any]:
         resp = parsers.parse_text_response(text)
     else:
         logger.error(f"{Fore.RED}Unknown parser type: {PARSER}{Style.RESET_ALL}")
-    logger.info(f"{Fore.CYAN}Parsed response:{Style.RESET_ALL} {resp}")
+    logger.debug(f"{Fore.CYAN}Parsed response:{Style.RESET_ALL} {resp}")
     return resp
 
 
@@ -190,7 +190,14 @@ def get_user_confirmation(action, expected_outcome, non_interactive=False):
     if non_interactive:
         print("Running in non-interactive mode. Automatically proceeding.")
         return True
-    return input("Do you want to proceed? (y/n): ").lower() == "y"
+    answer = input("Do you want to proceed? (y/n/reason why no): ")
+    if answer.lower() == "y":
+        return True, None
+    elif answer.lower() == "n":
+        return False, None
+    else:
+        return False, answer
+
 
 
 def ai_agent(task, non_interactive=False):
@@ -275,9 +282,13 @@ def ai_agent(task, non_interactive=False):
                     logger.info('Running in non-interactive mode. Automatically proceeding.')
                 else:
                     logger.warning(f'{Fore.RED}Potentially destructive action detected:{Style.RESET_ALL} {action}')
-                    if not get_user_confirmation(action, expected_outcome, non_interactive):
-                        logger.info('Action aborted by user.')
-                        conversation.append({'role': 'user', 'content': 'The last action was aborted by the user. Please suggest an alternative approach or continue with other actions.'})
+                    confirmed, reason = get_user_confirmation(action, expected_outcome, non_interactive)
+                    if not confirmed:
+                        logger.info(f'Action aborted by user{" with a reason" if reason else ""}.')
+                        reason = f"The user rejected the executing of the last suggested action, the reason is:\n {reason}" \
+                            if reason else \
+                            'The last action was aborted by the user without giving a particular reason. Please suggest an alternative approach or continue with other actions or ast user for the reason of rejection (if it is not obvious).'
+                        conversation.append({'role': 'user', 'content': f"{reason}"})
                         continue
             result = execute_command(action)
             output = result['output']
