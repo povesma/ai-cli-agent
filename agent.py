@@ -198,8 +198,6 @@ def get_user_confirmation(action, expected_outcome, non_interactive=False):
     else:
         return False, answer
 
-
-
 def ai_agent(task, non_interactive=False):
     logger.info(f'Starting task: {task}')
     conversation = [{'role': 'user', 'content': f'Task: {task}'}]

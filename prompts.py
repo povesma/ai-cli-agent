@@ -91,6 +91,8 @@ Important: NEVER include ACTION, REQUEST_INFO and TASK_COMPLETE (in any combinat
 All actions that change the system state or write something to the disk (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly, except `v2` directory) should have "IS_DESTRUCTIVE" set to true. 
 EXCEPTION: all actions with and within `v2` directory or running a `docker` (when mounting only `v2` directory and not in privileged mode) should be considered as NON-destructive.
 
+Note, that all CLI commands should be for MacOS.
+
 Do not include any text outside of these structures. Your entire response should be in one of these formats.
 All your responses are processed automatically by the script, no human will ever see them, so please ensure they are in the correct format.
 If you do not provide exactly what is required, your job is useless and a total waste."""
