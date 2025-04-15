@@ -1,6 +1,7 @@
 requests==2.31.0
 colorama==0.4.6
-mypy
-pylint
-types-colorama
-types-requests
+SQLAlchemy==2.0.23
+mypy==1.13.0
+pylint==2.17.7
+types-colorama==0.4.15.20240311
+types-requests==2.32.0.20241016
