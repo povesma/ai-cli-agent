@@ -88,7 +88,8 @@ The agent logs actions, explanations, and command outputs to the console. It als
 This project is proprietary and should not be shared.
 
 ## TODO
-1. On each GPT request we send the full conversation (including the full output of the commands). 
+1. After the model considers the task as complete - ask the user the confirmation and if anything else is needed (similar to asking the confirmation of destructive action).
+1. Now, on each GPT request we send the full conversation (including the full output of the commands). 
 On lengthy tasks it consumes a lot of tokens. 
 The token usage should be reduced dramatically. Possible approaches:
     1. Once the subtask is completed, often there's no much need to send the full conversation related to this subtask to the model (just the summary).
@@ -96,8 +97,10 @@ The token usage should be reduced dramatically. Possible approaches:
     1. All summaries should be explicitly marked as summaries, so the model can distinguish them from the full outputs.
     1. Utilize the model's ability to remember the context of the conversation and send only the new parts of the conversation (check if it is possible).
     1. Use separate conversation threads for the subtasks (when possible) to avoid sending the full conversation. 
+1. Editing / changing the files with CLI: model tends to use `sed` to change the files, but due to a) complex syntax; b) overlooking of what should be changed
+   it may produce a wrong command. `EDIT` / `CHANGE` should be a separate output type by the model, and the script should handle it separately - do the requested changes. Possible options: diff-like change, sed/regex-like change, complete file replacement (for small files). Model output should include the intended change result, and the change result verification mechanism (in a token-economical way).
 1. Some CLI programs that are run by this script, run longer or produce and informative output that the user should see earlier. Do not wait for the program to finish, but show the output as it comes (by default). This should be configurable.
-1. Some CLI programs that are run by this script, require user input (e.g. confirmation of a destructive action). This should be handled by the script, either by auto-accepting, asking for confirmation, or failing the task. This should be configurable.
+1. Some CLI programs that are run by this script, require user input (e.g. confirmation of an action). This should be handled by the script, either by auto-accepting, asking for confirmation, or failing the task. This should be configurable.
 1. Some CLI programs that are run by this script, never end (e.g. `tail -f`) on their own. This should be handled by the script, either by setting a timeout, or by detecting the end of the output (by some criteria), or allow user to intervene. 
 1. Some CLI programs that are run by this script, produce a streaming output (e.g. `ffmpeg` when converting the files shows progress). This output can be huge and mostly unnecessary. This should be handled by the script by sending to GPT just the summary, not each and every line of the progress output. Possible solutions: for the commands that may produce progress output, query GPT in a separate thread with the output and ask for the summary. This summary to be used in main thread instead of the full output. 
 1. When asking for the confirmation of a destructive action, allow the user to give not just y/n answer, but also to provide a comment (which should mean "NO" with the explanation). This comment should be sent to GPT to define the further steps.
