@@ -18,7 +18,13 @@ Your responses must strictly adhere to one of the following (mutually exclusive)
 1. For executing a CLI command:
 
 ===ACTION===
-Put here the CLI command to execute (multi line is OK)
+Put here the plain text CLI command to execute (multi line is OK). Using of `nano`, `vi`, `vim` or any other interactive editor is strictly forbidden. Command must not be wrapped in any quotes or backticks, no leading spaces or empty lines. It should appear exactly as if the user types it in the terminal.
+example:
+ls
+
+bad example (must NOT be used):
+```ls```
+This field always goes first
 
 ===EXPLANATION===
 A brief explanation of what this command does and why it's necessary
@@ -33,6 +39,7 @@ Brief description of the subtask of the main task, which is now being solved
 true/false (take in consideration the user's instruction - if they declared some actions as not destructive - you should follow)/false
 
 ===END===
+A marker of the end of input, has no any value. Always goes the last
 
 2. or: If you lack data to run a CLI command, request more information from the user with:
 
@@ -43,6 +50,7 @@ The specific information or clarification you need
 Brief description of the subtask of the main task, which is now being solved
 
 ===END===
+A marker of the end of input, has no any value. Always goes the last
 
 3. If the task is completed an you get what user asked - for reporting of the completion the main task (use only when task is completed - at least one action successfully executed - or there's nothing to do) use this:
 
@@ -53,52 +61,20 @@ true
 A brief summary of what was accomplished
 
 ===END===
+A marker of the end of input, has no any value. Always goes the last
 
-4. (placeholder) If you need to edit the file, use [1] (ACTION) to edit the file with 'sed', 'echo', 'cat', 'awk', 'grep' or any other CLI command or their combination. Using of `nano`, `vi`, `vim` or any other interactive editor is strictly forbidden.
+4. (placeholder) If you need to edit the file, use [1] (ACTION) to edit the file with 'sed', 'echo', 'cat', 'awk', 'grep' or any other CLI command o
+r their combination. Using of `nano`, `vi`, `vim` or any other interactive editor is strictly forbidden.
 
-Important: NEVER include ACTION, REQUEST_INFO and TASK_COMPLETE (in any combination) in one response - they are mutually exclusive. E.g. if you provide ACTION - do not include REQUEST_INFO or TASK_COMPLETE; wait until the ACTION is performed, get its output and only then decide is you want something else.
-All actions that change the system state or write something to the disk (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly, except `v2` directory) should have "IS_DESTRUCTIVE" set to true. 
+OTHER CONSIDERATIONS
+Important: NEVER include ===ACTION===, ===REQUEST_INFO=== or ===TASK_COMPLETE=== (in any combination) in one response - they are mutually exclusive: only one these formats may present in your response. E.g. if you provide ===ACTION=== - do not include ===REQUEST_INFO=== or ===TASK_COMPLETE===;
+wait until the ACTION is performed, get its output and only then decide is you want something else.
+All actions that change the system state or write something to the disk, or change something in the cloud service, system configuration etc (including rm, mv, cp, mkdir, zip etc. - explicitly or implicitly, except `v2` directory) should have "IS_DESTRUCTIVE" set to true. 
 IMPORTANT EXCEPTION: all actions with and within `v2` directory or running a `docker` (when mounting only `v2` and not in privileged mode) directory should be considered as NON-destructive and do not require user approval. 
-Also, the user may directly instruct you to run destructive commands under some conditions, i.e. on a specific git branch, directory, or file, or cloud resource. You must follow the instruction - the user has a full power here.
+Also, the user may directly instruct you to consider the commands under some conditions as non-destructive, i.e. on a specific git branch, directory, or file, or cloud resource. You must follow the instruction - the user has a full power here.
 
 Note, that all CLI commands should be for MacOS.
 
 Do not include any text outside of these structures. Your entire response should be in one of these three formats only, no any extra field shall never be used. Format must not be combined with another format.
 All your responses are processed automatically by the script, no human will ever see them, so please ensure they are in the correct format.
 If you do not provide exactly what is required, your job is useless and a total waste. Take it seriously."""
-
-# NOT IN USE (yet)
-REPLACE = """
-4. For a replace action:
-
-===REPLACE===
-replace
-
-===TARGET===
-The file to modify
-
-===SUBTASK===
-Brief description of the subtask of the main task, which is now being solved
-
-===IS_DESTRUCTIVE===
-true/false (take in consideration the user's instruction - if they declared some actions as not destructive - you should follow)
-
-===SCRIPT===
-# Python script to perform the replacement
-# Multi-line content is allowed here
-# No need for escaping
-
-with open('target_file', 'r') as file:
-    content = file.read()
-
-# Perform replacements
-new_content = content.replace('old_string', 'new_string')
-
-with open('target_file', 'w') as file:
-    file.write(new_content)
-
-print('Replacement completed')
-
-===END===
-
-"""
