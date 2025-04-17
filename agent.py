@@ -17,6 +17,7 @@ import time
 import parsers
 from parsers import extract_json_from_text
 from prompts import system_prompt_simple as system_prompt
+import edit_file
 
 # Initialize colorama for colored output
 init()
@@ -25,7 +26,9 @@ init()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-PARSER = "TEXT"
+# For now, JSON is COMPLETELY ABANDONNED, as LLM have difficulties to produce it in a correct way, specifically when it requires complex escaping.
+# JSON should never be used.
+PARSER = "TEXT"  # or "JSON", depends on the response format we expect from the LLM (now it is TEXT - using prompt system_prompt_simple from prompts.py)
 GPT_DELAY = int(os.getenv('GPT_DELAY', 2))
 
 # GPT API configuration
@@ -211,13 +214,13 @@ def ai_agent(task, non_interactive=False):
             gpt_calls += 1
 
             # Handling the error from API side
+            if response is None:
+                logger.error(f'{Fore.RED}Failed to get a response from GPT. Retrying... {gpt_calls}{Style.RESET_ALL}')
+                time.sleep(0.25)
+                continue
             if isinstance(response, dict) and "error" in response:
                 logger.error(f'{Fore.RED}{response["error"]}{Style.RESET_ALL}')
                 conversation.append({'role': 'user', 'content': response["message"]})
-                continue
-            if response is None:
-                logger.error(f'{Fore.RED}Failed to get a response from GPT. Retrying...{Style.RESET_ALL}')
-                time.sleep(0.25)
                 continue
             conversation.append({'role': 'assistant', 'content': response})
             global failed_json_count
@@ -227,8 +230,8 @@ def ai_agent(task, non_interactive=False):
                 logger.error(f'{Fore.RED}Failed to extract valid JSON from GPT response. Raw response:\n{Style.RESET_ALL}{response}')
                 conversation.append({'role': 'user', 'content': 'Your last response did not match the requested format. Please provide your response in the correct JSON format.'})
                 continue
-            # Check that ACTION, REQUEST_INFO and TASK_COMPLETE together (in any combination) are never in one response - they are exclusive.
-            exclusive_keys = ['action', 'request_info', 'task_complete']
+            # Check that ACTION, REQUEST_INFO, TASK_COMPLETE and EDIT together (in any combination) are never in one response - they are exclusive.
+            exclusive_keys = ['action', 'request_info', 'task_complete', 'edit']
             present_keys = [key for key in exclusive_keys if key in action_data]
 
             if len(present_keys) > 1:
@@ -240,16 +243,24 @@ def ai_agent(task, non_interactive=False):
                 }
 
                 error_key = frozenset(present_keys)
-                error_description = error_messages.get(error_key, 'multiple exclusive items')
+                error_description = error_messages.get(error_key, 'mutually exclusive fields')
 
                 logger.error(
-                    f'{Fore.RED}Multiple exclusive items are present in the response. This is not allowed. Response:\n{Style.RESET_ALL}{action_data}')
+                    f'{Fore.RED}Multiple exclusive items are present in the response. This is not allowed. Response:\n{Style.RESET_ALL}{action_data}, keys: {present_keys}, error: {error_description}')
                 conversation.append({
-                    'role': 'user',
-                    'content': f'Your last response contained {error_description}. You MUST redo you last response, and if it contains ACTION - keep it (because it was not executed!), and remove the conflicting fields. Please provide only one of these in your response.'
+                    'role': 'system',
+                    'content': f'Your last response contained {error_description}. You MUST redo you last response, and if it contains ACTION - keep it (because it was not executed!), and remove the conflicting fields: {present_keys} are present the response, but {exclusive_keys} are mutually exclusive! Please strictly adhere to the system prompt and use one of three response formats only, not mixing them!'
                 })
                 continue
 
+
+            if 'edit' in action_data:  # This is not implemented yet, so we don't expect it from LLM (and LLM should not send it!)
+                success = handle_edit_response(action_data['edit'])
+                if success:
+                    conversation.append({'role': 'user', 'content': "The file edit was successful. What's the next step?"})
+                else:
+                    conversation.append({'role': 'user', 'content': 'The file edit failed. Please suggest an alternative approach or provide more detailed edit instructions.'})
+                continue
 
             if 'request_info' in action_data:
                 if non_interactive:
@@ -259,9 +270,11 @@ def ai_agent(task, non_interactive=False):
                     user_input = input(f'{action_data["request_info"]}Your response: ')
                     conversation.append({'role': 'user', 'content': user_input})
                 continue
+
             if 'task_complete' in action_data and action_data['task_complete']:
                 logger.info(f'{Fore.GREEN}Task completed:{Style.RESET_ALL} {action_data["summary"]}')
                 break
+
             if not all(key in action_data for key in ['action', 'explanation', 'expected_outcome', 'is_destructive']):
                 logger.error(f'{Fore.RED}GPT response is missing required fields. Response:\n{Style.RESET_ALL}{action_data}')
                 conversation.append({'role': 'user', 'content': 'Your last response was missing required fields. Please ensure all required fields are included.'})
@@ -283,9 +296,11 @@ def ai_agent(task, non_interactive=False):
                     confirmed, reason = get_user_confirmation(action, expected_outcome, non_interactive)
                     if not confirmed:
                         logger.info(f'Action aborted by user{" with a reason" if reason else ""}.')
-                        reason = f"The user rejected the executing of the last suggested action, the reason is:\n {reason}" \
+                        reason = f"The user rejected the executing of the last suggested action, the reason is:\n {reason}"\
                             if reason else \
-                            'The last action was aborted by the user without giving a particular reason. Please suggest an alternative approach or continue with other actions or ast user for the reason of rejection (if it is not obvious).'
+                            'The last action was aborted by the user without giving a particular reason. \
+                            Please suggest an alternative approach or continue with other actions or ask\
+                            user for the reason of rejection (if it is not obvious).'
                         conversation.append({'role': 'user', 'content': f"{reason}"})
                         continue
             result = execute_command(action)
@@ -300,6 +315,26 @@ def ai_agent(task, non_interactive=False):
     finally:
         display_stats()
         return conversation
+
+
+def handle_edit_response(edit_data):
+    file_path = edit_data.get('file_path')
+    edit_instructions = edit_data.get('edit_instructions')
+    
+    if not file_path or not edit_instructions:
+        logger.error(f"{Fore.RED}Invalid edit response: missing file_path or edit_instructions{Style.RESET_ALL}")
+        return False
+    
+    try:
+        success = edit_file.apply_edit(file_path, edit_instructions)
+        if success:
+            logger.info(f"{Fore.GREEN}File edited successfully: {file_path}{Style.RESET_ALL}")
+        else:
+            logger.error(f"{Fore.RED}File edit verification failed: {file_path}{Style.RESET_ALL}")
+        return success
+    except Exception as e:
+        logger.error(f"{Fore.RED}Error during file edit: {str(e)}{Style.RESET_ALL}")
+        return False
 
 def signal_handler(signum, frame):
     print("Interrupt received, stopping the agent...")
@@ -354,5 +389,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
